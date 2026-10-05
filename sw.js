@@ -1,7 +1,7 @@
 // Network-first so updates show up straight away; falls back to the cache offline.
-const CACHE = 'carb-load-v4';
+const CACHE = 'carb-load-v5';
 const ASSETS = [
-  './', './index.html', './style.css', './app.js', './foods.js',
+  './', './index.html', './style.css', './app.js', './foods.js', './lookup.js',
   './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png',
 ];
 

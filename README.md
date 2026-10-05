@@ -8,6 +8,7 @@ Enter your weight, race distance and date. It works out a daily carb target (g p
 - **Plan:** each load day, meal by meal, with tick-off tracking and a progress bar. Tap **Edit** on any meal to set exact foods and portions, for that day or every load day. Meals you haven't set are suggested from your ticked foods and absorb whatever carbs are left. Includes a race-morning breakfast and timeline.
 - **Training:** your taper runs. Carbs for runs on load days are added to that day, and hard or long sessions on load days are flagged.
 - **Foods:** 43 built-in UK foods with typical carbs per serving, gut-friendliness flags and diet filters (vegetarian, vegan, gluten-free, dairy-free). You can also add your own.
+- **Online lookup:** search UK products or scan a barcode via [Open Food Facts](https://world.openfoodfacts.org) (free, no key). Carbs per 100g, serving and pack size are filled in for you to check before saving. Works in Foods → Add a food and in the meal editor. Needs a connection, and barcode scanning needs camera access (HTTPS or localhost).
 - **Shop:** quantities rounded up to typical pack sizes and grouped by aisle. Shareable as text.
 - **Beetroot/nitrate (optional):** daily loading or race-day-only dosing, with shot carbs counted toward your targets.
 
@@ -29,6 +30,7 @@ then open http://localhost:8935. To use it on your phone, deploy the folder to a
 - `style.css`: styles (light/dark aware)
 - `app.js`: plan logic and rendering
 - `foods.js`: built-in food database. Edit carbs and pack sizes here.
+- `lookup.js`: Open Food Facts search, barcode lookup and scanner
 - `sw.js`, `manifest.webmanifest`, `icon*`: PWA bits
 
 General guidance, not medical advice.

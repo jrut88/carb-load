@@ -678,6 +678,7 @@
     const el = document.getElementById('tab-foods');
     el.innerHTML = foodsHTML();
     renderFoodList(el);
+    renderFinder('foods');
   }
 
   // Shared by the Foods tab and the food step of first-run setup.
@@ -690,29 +691,9 @@
       <div class="search-wrap">${icon('magnifying-glass')}<input type="search" class="food-search" placeholder="Search foods" value="${esc(foodQuery)}" aria-label="Search foods"></div>
       <div class="food-list"></div>
       <div class="list-foot"><button type="button" class="text-btn" data-action="clear-prefs">${icon('x')} Untick all</button></div>
-      <details class="card add-food">
-        <summary><span class="badge-ico">${icon('plus', 'ph-bold')}</span><span class="row-title">Add your own food</span>${icon('caret-down', 'ph-bold')}</summary>
-        <form class="add-food-form" autocomplete="off">
-          <label class="field"><span class="mono">Name</span><input name="name" required maxlength="40" placeholder="e.g. Mum’s banana bread"></label>
-          <div class="grid2">
-            <label class="field"><span class="mono">Serving</span><input name="serving" required maxlength="30" placeholder="1 slice"></label>
-            <label class="field"><span class="mono">Carbs / serving (g)</span><input name="carbs" type="number" inputmode="decimal" min="1" max="300" required></label>
-          </div>
-          <div class="grid2">
-            <label class="field"><span class="mono">Servings per pack</span><input name="perPack" type="number" inputmode="decimal" min="1" max="100" value="1" required></label>
-            <label class="field"><span class="mono">Pack</span><input name="pack" maxlength="30" placeholder="1 loaf"></label>
-          </div>
-          <div class="grid2">
-            <label class="field"><span class="mono">Use as</span><div class="select-wrap"><select name="slot">${SLOT_OPTIONS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select>${icon('caret-down', 'ph-bold')}</div></label>
-            <label class="field"><span class="mono">Aisle</span><div class="select-wrap"><select name="aisle">${AISLES.map((a) => `<option ${a === 'Other' ? 'selected' : ''}>${a}</option>`).join('')}</select>${icon('caret-down', 'ph-bold')}</div></label>
-          </div>
-          <fieldset class="flags">
-            <legend class="mono">This food is</legend>
-            ${[['easy', 'Low fibre / fat', true], ['V', 'Vegetarian'], ['N', 'Vegan'], ['G', 'Gluten-free'], ['D', 'Dairy-free']].map(([n, l, on]) => `
-              <label class="flag"><input type="checkbox" name="${n}" ${on ? 'checked' : ''}><span>${l}</span></label>`).join('')}
-          </fieldset>
-          <button type="submit" class="pill-btn primary wide">${icon('plus', 'ph-bold')} Add food</button>
-        </form>
+      <details class="card add-food"${finderIsActive('foods') ? ' open' : ''}>
+        <summary><span class="badge-ico">${icon('plus', 'ph-bold')}</span><span class="row-title">Add a food</span>${icon('caret-down', 'ph-bold')}</summary>
+        <div class="finder-host"></div>
       </details>`;
   }
 
@@ -831,6 +812,7 @@
           <button type="button" class="pill-btn primary" data-action="setup-step" data-step="3">Next: race breakfast ${icon('arrow-right', 'ph-bold')}</button>
         </div>`;
       renderFoodList(el);
+      renderFinder('foods');
       return;
     }
 
@@ -1018,6 +1000,7 @@
   }
 
   function renderSheet() {
+    stopScan('sheet');
     const e = editing;
     const items = e.items.map((x) => ({ ...x, food: foodById(x.id) })).filter((x) => x.food);
     const total = Math.round(items.reduce((s, x) => s + x.n * x.food.carbs, 0));
@@ -1058,6 +1041,9 @@
         <div class="search-wrap">${icon('magnifying-glass')}<input type="search" class="sheet-search" placeholder="Search all foods" value="${esc(pickQuery)}" aria-label="Search all foods"></div>
         <div class="pick-list"></div>
 
+        <div class="group-head"><span class="mono">Not in your foods? Search UK products</span></div>
+        <div class="finder-host"></div>
+
         <div class="sheet-foot">
           ${isRace ? '' : `
             <label class="every">
@@ -1071,6 +1057,7 @@
         </div>
       </div>`;
     renderPickList();
+    renderFinder('sheet');
   }
 
   function renderPickList() {
@@ -1098,7 +1085,7 @@
             </span>
             <span class="plus">${icon('plus', 'ph-bold')}</span>
           </button>`).join('')}</div>`
-      : '<p class="fine">No foods match. You can add your own in the Foods tab.</p>');
+      : `<p class="fine">None of your foods match. <button type="button" class="text-btn small inline" data-off="search-online" data-ctx="sheet" data-q="${esc(pickQuery)}">${icon('globe-simple')} Search UK products for “${esc(pickQuery)}”</button></p>`);
   }
 
   function saveEditor() {
@@ -1163,13 +1150,268 @@
     renderPickList();
   });
 
-  sheet.addEventListener('close', () => { editing = null; });
+  sheet.addEventListener('close', () => {
+    editing = null;
+    stopScan('sheet');
+    finder.sheet = blankFinder();
+  });
+
+  // ---------- online food lookup (Open Food Facts) ----------
+
+  const Lookup = window.FoodLookup;
+  const round1 = (x) => Math.round(x * 10) / 10;
+  const blankFinder = () => ({ query: '', status: 'idle', results: [], message: '', draft: null, scanning: false, scan: null, scanError: '', added: '', token: 0 });
+  // One finder in the Foods panel (also used by setup step 2) and one in the meal editor.
+  const finder = { foods: blankFinder(), sheet: blankFinder() };
+
+  const finderIsActive = (ctx) => { const f = finder[ctx]; return f.status !== 'idle' || f.draft || f.scanning || f.added; };
+
+  function finderHost(ctx) {
+    return ctx === 'sheet'
+      ? sheet.querySelector('.finder-host')
+      : document.querySelector('.tab-panel:not([hidden]) .finder-host');
+  }
+
+  function renderFinder(ctx) {
+    const host = finderHost(ctx);
+    if (!host) return;
+    const f = finder[ctx];
+    let body = '';
+    if (f.draft) {
+      body = '';
+    } else if (f.scanning) {
+      body = `
+        <div class="scan-box">
+          ${f.scanError ? `<p class="off-status err">${icon('camera-slash', 'ph-fill')} ${esc(f.scanError)}</p>` : `<div id="scan-${ctx}" class="scan-view"></div>`}
+          <form class="barcode-form" data-ctx="${ctx}">
+            <input name="code" inputmode="numeric" pattern="[0-9]*" maxlength="14" placeholder="Or type the barcode number" aria-label="Barcode number">
+            <button type="submit" class="pill-btn ghost small">Look up</button>
+          </form>
+          <button type="button" class="text-btn small" data-off="stop-scan" data-ctx="${ctx}">${icon('x')} Cancel scan</button>
+        </div>`;
+    } else if (f.status === 'loading') {
+      body = `<p class="off-status">${icon('circle-notch', 'ph-bold spin')} ${esc(f.message)}</p>`;
+    } else if (f.status === 'error') {
+      body = `<p class="off-status err">${icon('warning-circle', 'ph-fill')} ${esc(f.message)}</p>`;
+    } else if (f.status === 'results') {
+      body = f.results.length
+        ? `<div class="card list off-results">${f.results.map((r) => `
+            <button type="button" class="row pick" data-off="pick" data-ctx="${ctx}" data-code="${esc(r.code)}">
+              <span class="row-main">
+                <span class="row-title">${esc(r.name)}</span>
+                <span class="row-sub">${esc([r.brand, r.quantity].filter(Boolean).join(' · '))}</span>
+              </span>
+              <span class="off-carbs"><b>${fmtN(round1(r.carbs100))}g</b><span class="mono dim">/100g</span></span>
+            </button>`).join('')}</div>`
+        : `<p class="off-status">No UK products with carb data matched “${esc(f.query)}”. Try fewer words, or scan the barcode.</p>`;
+    }
+
+    const showForm = f.draft || ctx === 'foods';
+    host.innerHTML = `
+      ${f.added ? `<p class="off-status ok">${icon('check-circle', 'ph-fill')} Added ${esc(f.added)}${ctx === 'foods' ? ' and ticked it' : ' to this meal'}.</p>` : ''}
+      ${f.draft ? '' : `
+        <form class="off-search" data-ctx="${ctx}" role="search">
+          <div class="search-wrap">${icon('globe-simple')}<input type="search" name="q" value="${esc(f.query)}" placeholder="Search UK products" enterkeyhint="search" aria-label="Search Open Food Facts"></div>
+          <button type="button" class="round-btn" data-off="scan" data-ctx="${ctx}" aria-label="Scan a barcode">${icon('barcode')}</button>
+        </form>`}
+      ${body}
+      ${showForm ? `${f.draft ? '' : '<div class="or"><span class="mono dim">Or enter it yourself</span></div>'}${foodFormHTML(ctx, f.draft)}` : ''}
+      <p class="fine source">Product data from <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener">Open Food Facts</a>, added by shoppers. Check it against the pack.</p>`;
+  }
+
+  function foodFormHTML(ctx, d) {
+    d = d || {};
+    const fl = d.flags || { easy: true };
+    const fromPack = d.code != null;
+    return `
+      <form class="food-form" data-ctx="${ctx}" autocomplete="off">
+        ${fromPack ? `<div class="draft-head"><span class="mono">Check the details</span><button type="button" class="text-btn small" data-off="clear-draft" data-ctx="${ctx}">${icon('arrow-left')} Back</button></div>` : ''}
+        <label class="field"><span class="mono">Name</span><input name="name" required maxlength="60" value="${esc(d.name || '')}" placeholder="Mum’s banana bread"></label>
+        ${d.carbs100 != null ? `
+          <div class="per100">${icon('database')}<span><b>${fmtN(round1(d.carbs100))}g</b> carbs per 100g${d.packG ? ` · ${fmtN(d.packG)}g pack` : ''}</span></div>
+          <label class="field"><span class="mono">Serving weight (g)</span><input name="servingG" type="number" inputmode="decimal" min="1" max="2000" value="${d.servingG}" data-c100="${d.carbs100}" data-packg="${d.packG || ''}"></label>` : ''}
+        <div class="grid2">
+          <label class="field"><span class="mono">Serving</span><input name="serving" required maxlength="30" value="${esc(d.serving || '')}" placeholder="1 slice"></label>
+          <label class="field"><span class="mono">Carbs / serving (g)</span><input name="carbs" type="number" inputmode="decimal" min="0.1" max="300" step="0.1" value="${d.carbs ?? ''}" required></label>
+        </div>
+        <div class="grid2">
+          <label class="field"><span class="mono">Servings per pack</span><input name="perPack" type="number" inputmode="decimal" min="1" max="200" step="0.1" value="${d.perPack || 1}" required></label>
+          <label class="field"><span class="mono">Pack</span><input name="pack" maxlength="30" value="${esc(d.pack || '')}" placeholder="1 loaf"></label>
+        </div>
+        <div class="grid2">
+          <label class="field"><span class="mono">Use as</span><div class="select-wrap"><select name="slot">${SLOT_OPTIONS.map(([v, l]) => `<option value="${v}" ${v === (d.slot || 'breakfast') ? 'selected' : ''}>${l}</option>`).join('')}</select>${icon('caret-down', 'ph-bold')}</div></label>
+          <label class="field"><span class="mono">Aisle</span><div class="select-wrap"><select name="aisle">${AISLES.map((a) => `<option ${a === (d.aisle || 'Other') ? 'selected' : ''}>${a}</option>`).join('')}</select>${icon('caret-down', 'ph-bold')}</div></label>
+        </div>
+        <fieldset class="flags">
+          <legend class="mono">This food is</legend>
+          ${[['easy', 'Low fibre / fat'], ['V', 'Vegetarian'], ['N', 'Vegan'], ['G', 'Gluten-free'], ['D', 'Dairy-free']].map(([n, l]) => `
+            <label class="flag"><input type="checkbox" name="${n}" ${fl[n] ? 'checked' : ''}><span>${l}</span></label>`).join('')}
+        </fieldset>
+        ${fromPack ? `<p class="fine">Fibre and diet are guessed from the label${d.gut === 'heavy' ? ', and this looks high in fibre' : ''}. Check them.</p>` : ''}
+        <button type="submit" class="pill-btn primary wide">${icon('plus', 'ph-bold')} ${ctx === 'sheet' ? 'Add to meal' : fromPack ? 'Save food' : 'Add food'}</button>
+      </form>`;
+  }
+
+  async function runSearch(ctx, query) {
+    const f = finder[ctx];
+    const q = String(query || '').trim();
+    if (q.length < 2) return;
+    stopScan(ctx);
+    const token = ++f.token;
+    Object.assign(f, { query: q, status: 'loading', message: 'Searching Open Food Facts…', draft: null, added: '' });
+    renderFinder(ctx);
+    try {
+      const results = await Lookup.search(q);
+      if (token !== f.token) return;
+      Object.assign(f, { status: 'results', results });
+    } catch {
+      if (token !== f.token) return;
+      Object.assign(f, { status: 'error', message: 'Couldn’t reach Open Food Facts. Check your connection and try again.' });
+    }
+    renderFinder(ctx);
+  }
+
+  async function loadProduct(ctx, code, viaBarcode) {
+    const f = finder[ctx];
+    const token = ++f.token;
+    const back = f.results.length ? 'results' : 'idle';
+    Object.assign(f, { status: 'loading', message: viaBarcode ? `Looking up ${code}…` : 'Loading product…', added: '' });
+    renderFinder(ctx);
+    try {
+      const p = await Lookup.product(code);
+      if (token !== f.token) return;
+      if (p) {
+        Object.assign(f, { status: back, draft: Lookup.toDraft(p) });
+      } else {
+        // Not in the database: open a blank form so it can be entered by hand.
+        Object.assign(f, { status: back, draft: { code, flags: { easy: true } }, added: '' });
+        f.notFound = code;
+      }
+    } catch {
+      if (token !== f.token) return;
+      Object.assign(f, { status: 'error', message: 'Couldn’t load that product. Check your connection and try again.' });
+    }
+    renderFinder(ctx);
+    if (f.notFound) {
+      const host = finderHost(ctx);
+      host?.insertAdjacentHTML('afterbegin', `<p class="off-status">${icon('info', 'ph-fill')} Barcode ${esc(f.notFound)} isn’t on Open Food Facts yet. Enter it from the pack below.</p>`);
+      f.notFound = null;
+    }
+  }
+
+  async function startScanning(ctx) {
+    const f = finder[ctx];
+    stopScan(ctx);
+    Object.assign(f, { scanning: true, scanError: '', draft: null, added: '', status: 'idle' });
+    renderFinder(ctx);
+    try {
+      const scan = await Lookup.startScan(`scan-${ctx}`, (code) => { stopScan(ctx); loadProduct(ctx, code, true); });
+      if (!f.scanning) { scan.stop(); return; } // cancelled while the camera was starting
+      f.scan = scan;
+    } catch (err) {
+      if (!f.scanning) return;
+      const blocked = err && (err.name === 'NotAllowedError' || /permission/i.test(String(err.message || err)));
+      f.scanError = blocked
+        ? 'Camera access is blocked. Allow it in your browser settings, or type the barcode below.'
+        : 'Couldn’t start the camera. Type the barcode number below instead.';
+      renderFinder(ctx);
+    }
+  }
+
+  function stopScan(ctx) {
+    const f = finder[ctx];
+    if (!f.scanning) return;
+    f.scanning = false;
+    if (f.scan) { f.scan.stop(); f.scan = null; }
+  }
+
+  function saveFoodForm(form) {
+    const ctx = form.dataset.ctx;
+    const f = finder[ctx];
+    const fd = new FormData(form);
+    const diet = ['V', 'N', 'G', 'D'].filter((k) => fd.get(k)).join('');
+    const food = {
+      id: makeId(),
+      custom: true,
+      name: String(fd.get('name')).trim(),
+      serving: String(fd.get('serving')).trim(),
+      carbs: round1(Number(fd.get('carbs'))),
+      perPack: Number(fd.get('perPack')) || 1,
+      pack: String(fd.get('pack') || '').trim() || '1 pack',
+      aisle: String(fd.get('aisle')),
+      slots: [String(fd.get('slot'))],
+      gut: fd.get('easy') ? 'easy' : f.draft && f.draft.gut === 'heavy' ? 'heavy' : 'ok',
+      diet: diet.includes('N') && !diet.includes('V') ? `V${diet}` : diet,
+      max: 2,
+      ...(f.draft && f.draft.code ? { barcode: f.draft.code } : {}),
+    };
+    if (!food.name || !(food.carbs > 0)) return;
+    state.customFoods.push(food);
+    if (!state.preferred.includes(food.id)) state.preferred.push(food.id);
+    finder[ctx] = { ...blankFinder(), added: food.name };
+    if (ctx === 'sheet' && editing) {
+      editing.items.push({ id: food.id, n: 1 });
+      save();
+      renderSheet();
+      return;
+    }
+    save();
+    rerender();
+  }
+
+  document.addEventListener('click', (e) => {
+    const t = e.target.closest('[data-off]');
+    if (!t) return;
+    const ctx = t.dataset.ctx || 'foods';
+    const a = t.dataset.off;
+    if (a === 'scan') startScanning(ctx);
+    else if (a === 'stop-scan') { stopScan(ctx); renderFinder(ctx); }
+    else if (a === 'pick') loadProduct(ctx, t.dataset.code, false);
+    else if (a === 'clear-draft') { finder[ctx].draft = null; renderFinder(ctx); }
+    else if (a === 'search-online') {
+      runSearch(ctx, t.dataset.q);
+      finderHost(ctx)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  });
+
+  document.addEventListener('submit', (e) => {
+    const form = e.target;
+    if (form.classList.contains('off-search')) {
+      e.preventDefault();
+      runSearch(form.dataset.ctx, new FormData(form).get('q'));
+    } else if (form.classList.contains('barcode-form')) {
+      e.preventDefault();
+      const code = String(new FormData(form).get('code') || '').replace(/\D/g, '');
+      if (code.length < 8) return;
+      stopScan(form.dataset.ctx);
+      loadProduct(form.dataset.ctx, code, true);
+    } else if (form.classList.contains('food-form')) {
+      e.preventDefault();
+      saveFoodForm(form);
+    }
+  });
+
+  // Changing the serving weight recalculates carbs and servings per pack.
+  document.addEventListener('input', (e) => {
+    const t = e.target;
+    if (t.name !== 'servingG' || !t.form) return;
+    const g = Number(t.value);
+    if (!(g > 0)) return;
+    const form = t.form;
+    form.elements.carbs.value = round1(Number(t.dataset.c100) * g / 100);
+    form.elements.serving.value = `${fmtN(g)}g`;
+    const packG = Number(t.dataset.packg);
+    if (packG > 0) form.elements.perPack.value = Math.max(1, round1(packG / g));
+    const f = finder[form.dataset.ctx];
+    if (f.draft) Object.assign(f.draft, { servingG: g, carbs: Number(form.elements.carbs.value), serving: form.elements.serving.value, perPack: Number(form.elements.perPack.value) });
+  });
 
   // ---------- tabs ----------
 
   const RENDERERS = { plan: renderPlan, training: renderTraining, foods: renderFoods, shop: renderShop, setup: renderSetup };
 
   function showTab(tab) {
+    stopScan('foods');
     state.tab = tab;
     save();
     document.querySelectorAll('.tab-panel').forEach((s) => { s.hidden = s.id !== `tab-${tab}`; });
@@ -1333,32 +1575,6 @@
     }
     save();
     updateSetupLive();
-  });
-
-  app.addEventListener('submit', (e) => {
-    if (!e.target.classList.contains('add-food-form')) return;
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    const diet = ['V', 'N', 'G', 'D'].filter((k) => fd.get(k)).join('');
-    const food = {
-      id: makeId(),
-      custom: true,
-      name: String(fd.get('name')).trim(),
-      serving: String(fd.get('serving')).trim(),
-      carbs: Number(fd.get('carbs')),
-      perPack: Number(fd.get('perPack')) || 1,
-      pack: String(fd.get('pack') || '').trim() || '1 pack',
-      aisle: String(fd.get('aisle')),
-      slots: [String(fd.get('slot'))],
-      gut: fd.get('easy') ? 'easy' : 'ok',
-      diet: diet.includes('N') && !diet.includes('V') ? `V${diet}` : diet,
-      max: 2,
-    };
-    if (!food.name || !(food.carbs > 0)) return;
-    state.customFoods.push(food);
-    state.preferred.push(food.id);
-    save();
-    rerender();
   });
 
   async function shareList() {
